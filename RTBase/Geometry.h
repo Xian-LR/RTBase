@@ -106,7 +106,23 @@ public:
 	// Add code here
 	Vec3 sample(Sampler* sampler, float& pdf)
 	{
-		return Vec3(0, 0, 0);
+		// Use two random numbers to sample a point on the triangle
+		float r1 = sampler->next();
+		float r2 = sampler->next();
+
+		// Convert uniform random variables to barycentric coordinates
+		float sqrt_r1 = sqrtf(r1);
+		float beta = sqrt_r1 * (1.0f - r2);
+		float gamma = sqrt_r1 * r2;
+		float alpha = 1.0f - beta - gamma;
+
+		// Compute the final point using barycentric coordinates
+		Vec3 p = vertices[0].p * alpha + vertices[1].p * beta + vertices[2].p * gamma;
+
+		// PDF is constant over the triangle: 1 / triangle area
+		pdf = 1.0f / area;
+
+		return p;
 	}
 	Vec3 gNormal()
 	{
