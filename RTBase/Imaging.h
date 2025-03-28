@@ -138,7 +138,7 @@ public:
 class GaussianFilter : public ImageFilter
 {
 public:
-	GaussianFilter(float r, float a = 2.0f)
+	GaussianFilter(float r  = 1.0f, float a = 2.0f)
 		: radius(r), alpha(a)
 	{
 	}
@@ -167,6 +167,59 @@ private:
 	float radius;
 	float alpha;
 };
+
+class MitchellNetravaliFilter : public ImageFilter
+{
+public:
+	MitchellNetravaliFilter(float r = 2.0f, float b = 1.0f / 3.0f, float c = 1.0f / 3.0f)
+		: radius(r), B(b), C(c)
+	{
+	}
+
+	float filter(const float x, const float y) const override
+	{
+		// Separable implementation - apply 1D filter in each dimension
+		return mitchell1D(x) * mitchell1D(y);
+	}
+
+	int size() const override
+	{
+		return static_cast<int>(std::ceil(radius));
+	}
+
+private:
+	float radius;
+	float B;
+	float C;
+
+	// 1D Mitchell filter function
+	float mitchell1D(float t) const
+	{
+		float at = std::abs(t);
+
+		// Outside of filter radius -> zero contribution
+		if (at > radius)
+			return 0.0f;
+
+		// Scale to -2 to 2 range where Mitchell is defined
+		at *= 2.0f / radius;
+
+		// Mitchell-Netravali cubic function
+		if (at < 1.0f) {
+			return (1.0f / 6.0f) * ((12.0f - 9.0f * B - 6.0f * C) * at * at * at +
+				(-18.0f + 12.0f * B + 6.0f * C) * at * at +
+				(6.0f - 2.0f * B));
+		}
+		else {
+			return (1.0f / 6.0f) * ((-B - 6.0f * C) * at * at * at +
+				(6.0f * B + 30.0f * C) * at * at +
+				(-12.0f * B - 48.0f * C) * at +
+				(8.0f * B + 24.0f * C));
+		}
+	}
+};
+
+
 
 class BoxFilter : public ImageFilter
 {
