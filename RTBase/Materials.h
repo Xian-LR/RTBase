@@ -104,17 +104,41 @@ public:
 	static float lambdaGGX(Vec3 wi, float alpha)
 	{
 		// Add code here
-		return 1.0f;
+	    // Check if the direction is valid 
+		float cosTheta = wi.z;
+		if (cosTheta >= 0.9999f)
+			return 0.0f;
+
+		// Calculate tangent^2 of the angle
+		float tanThetaSq = (1.0f - cosTheta * cosTheta) / (cosTheta * cosTheta);
+
+		// GGX shadowing function
+		return 0.5f * (-1.0f + std::sqrt(1.0f + alpha * alpha * tanThetaSq));
 	}
+
 	static float Gggx(Vec3 wi, Vec3 wo, float alpha)
 	{
 		// Add code here
-		return 1.0f;
+		// Smith's separable shadowing-masking function with GGX distribution
+		return 1.0f / (1.0f + lambdaGGX(wi, alpha) + lambdaGGX(wo, alpha));
 	}
 	static float Dggx(Vec3 h, float alpha)
 	{
 		// Add code here
-		return 1.0f;
+		// Normal distribution function for GGX/Trowbridge-Reitz
+		float cosTheta = h.z;
+		float cosThetaSq = cosTheta * cosTheta;
+
+		// Check if the half-vector is valid
+		if (cosTheta < 1e-6f)
+			return 0.0f;
+
+		float tanThetaSq = (1.0f - cosThetaSq) / cosThetaSq;
+		float alphaSq = alpha * alpha;
+
+		// Calculation of GGX/Trowbridge-Reitz distribution
+		float denom = M_PI * cosThetaSq * cosThetaSq * (alphaSq + tanThetaSq) * (alphaSq + tanThetaSq);
+		return alphaSq / denom;
 	}
 };
 
@@ -264,22 +288,134 @@ public:
 	Vec3 sample(const ShadingData& shadingData, Sampler* sampler, Colour& reflectedColour, float& pdf)
 	{
 		// Replace this with Conductor sampling code
-		Vec3 wi = SamplingDistributions::cosineSampleHemisphere(sampler->next(), sampler->next());
-		pdf = wi.z / M_PI;
-		reflectedColour = albedo->sample(shadingData.tu, shadingData.tv) / M_PI;
-		wi = shadingData.frame.toWorld(wi);
+		// Get outgoing direction in local coordinates
+		Vec3 woLocal = shadingData.frame.toLocal(shadingData.wo);
+
+		// Check if direction is valid (above surface)
+		if (woLocal.z <= 0)
+		{
+			pdf = 0.0f;
+			reflectedColour = Colour(0.0f, 0.0f, 0.0f);
+			return Vec3(0.0f, 0.0f, 1.0f);
+		}
+
+		// Special case: near-perfect mirror when roughness is very low
+		float epsilon = 0.0001f;
+		Vec3 wi;
+
+		if (alpha < epsilon)
+		{
+			// Perfect mirror reflection
+			Vec3 wiLocal = Vec3(-woLocal.x, -woLocal.y, woLocal.z);
+			wi = shadingData.frame.toWorld(wiLocal);
+			pdf = 1.0f;
+
+			// Calculate Fresnel reflectance
+			float cosTheta = wiLocal.z;
+			Colour F = ShadingHelper::fresnelConductor(cosTheta, eta, k);
+
+			// Set color with base albedo and Fresnel factor
+			reflectedColour = albedo->sample(shadingData.tu, shadingData.tv) * F;
+			return wi;
+		}
+
+		// Sample GGX distribution to get microfacet normal
+		// Convert uniform random samples to GGX distribution
+		float theta = std::atan(alpha * std::sqrt(sampler->next()) / std::sqrt(1 - sampler->next()));
+		float phi = 2.0f * M_PI * sampler->next();
+
+		// Convert to Cartesian coordinates
+		float sinTheta = std::sin(theta);
+		float cosTheta = std::cos(theta);
+		Vec3 wh = Vec3(sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta);
+
+
+		// Reflect wo around wm to get wi
+		Vec3 wiLocal = wh * 2.0f *  woLocal.dot(wh) - woLocal;
+		if (wiLocal.z <= 0)
+		{
+			pdf = 0.0f;
+			reflectedColour = Colour(0.0f, 0.0f, 0.0f);
+			return Vec3(0.0f, 0.0f, 1.0f);
+		}
+
+		// Calculate BRDF value
+		wi = shadingData.frame.toWorld(wiLocal);
+		float D = ShadingHelper::Dggx(wh, alpha);
+		pdf = D * wh.z / (4.0f * woLocal.dot(wh));
+
+		// Compute final BRDF 
+		Colour F = ShadingHelper::fresnelConductor(woLocal.dot(wh), eta, k);
+		float G = ShadingHelper::Gggx(wiLocal, woLocal, alpha);
+
+		Colour baseColor = albedo->sample(shadingData.tu, shadingData.tv);
+		reflectedColour = baseColor * F * D * G / (4.0f * woLocal.z);
+
 		return wi;
 	}
 	Colour evaluate(const ShadingData& shadingData, const Vec3& wi)
 	{
 		// Replace this with Conductor evaluation code
-		return albedo->sample(shadingData.tu, shadingData.tv) / M_PI;
+		// Convert directions to local space
+		Vec3 woLocal = shadingData.frame.toLocal(shadingData.wo);
+		Vec3 wiLocal = shadingData.frame.toLocal(wi);
+
+		// Check if both directions are above surface
+		if (woLocal.z <= 0 || wiLocal.z <= 0)
+			return Colour(0.0f, 0.0f, 0.0f);
+
+		// Compute half vector between wi and wo
+		Vec3 wh = (wiLocal + woLocal).normalize();
+		if (wh.z <= 0)
+			return Colour(0.0f, 0.0f, 0.0f);
+
+		// Perfect mirror case
+		float epsilon = 0.0001f;
+		if (alpha < epsilon) {
+			return Colour(0.0f, 0.0f, 0.0f);
+		}
+
+		// Compute Fresnel term
+		float cosTheta = std::max(0.0f, wiLocal.dot(wh));
+		Colour F = ShadingHelper::fresnelConductor(cosTheta, eta, k);
+
+		// Compute distribution term
+		float D = ShadingHelper::Dggx(wh, alpha);
+
+		// Compute shadowing-masking term
+		float G = ShadingHelper::Gggx(wiLocal, woLocal, alpha);
+
+		// Microfacet BRDF formula
+		Colour baseColor = albedo->sample(shadingData.tu, shadingData.tv);
+		Colour brdf = baseColor * F * D * G / (4.0f * wiLocal.z * woLocal.z);
+
+		return brdf;
 	}
 	float PDF(const ShadingData& shadingData, const Vec3& wi)
 	{
 		// Replace this with Conductor PDF
+		// Convert directions to local space
+		Vec3 woLocal = shadingData.frame.toLocal(shadingData.wo);
 		Vec3 wiLocal = shadingData.frame.toLocal(wi);
-		return SamplingDistributions::cosineHemispherePDF(wiLocal);
+
+		// Check if both directions are above surface
+		if (woLocal.z <= 0.0f || wiLocal.z <= 0.0f)
+			return 0.0f;
+
+		// Perfect mirror case
+		float epsilon = 0.0001f;
+		if (alpha < epsilon) {
+			return 0.0f; // Delta distribution
+		}
+
+		// Compute half vector
+		Vec3 wh = (wiLocal + woLocal).normalize();
+		if (wh.z <= 0)
+			return 0.0f;
+
+		// Calculate PDF based on GGX distribution
+		float D = ShadingHelper::Dggx(wh, alpha);
+		return D * wh.z / (4.0f * woLocal.dot(wh));
 	}
 	bool isPureSpecular()
 	{
