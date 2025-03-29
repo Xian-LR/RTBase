@@ -191,29 +191,98 @@ public:
 		}
 		return Colour(0.0f, 0.0f, 0.0f);
 	}
+
+	//void render()
+	//{
+	//	film->incrementSPP();
+	//	for (unsigned int y = 0; y < film->height; y++)
+	//	{
+	//		for (unsigned int x = 0; x < film->width; x++)
+	//		{
+	//			float px = x + 0.5f;
+	//			float py = y + 0.5f;
+	//			Ray ray = scene->camera.generateRay(px, py);
+	//			//Colour col = viewNormals(ray);
+	//			//Colour col = albedo(ray);
+	//			Colour pathThroughput = Colour(1.0f, 1.0f, 1.0f);
+	//			Colour col = pathTrace(ray, pathThroughput, 0, &samplers[0]);
+	//			film->splat(px, py, col);
+	//			unsigned char r = (unsigned char)(col.r * 255);
+	//			unsigned char g = (unsigned char)(col.g * 255);
+	//			unsigned char b = (unsigned char)(col.b * 255);
+	//			film->tonemap(x, y, r, g, b);
+	//			canvas->draw(x, y, r, g, b);
+	//		}
+	//	}
+	//}
+
+
 	void render()
 	{
+		#ifdef min
+		#undef min
+		#endif
+		// Increment samples per pixel
 		film->incrementSPP();
-		for (unsigned int y = 0; y < film->height; y++)
-		{
-			for (unsigned int x = 0; x < film->width; x++)
+
+		// Determine tile dimensions
+		const int tileSize = 32;
+		const int tilesX = (film->width + tileSize - 1) / tileSize;
+		const int tilesY = (film->height + tileSize - 1) / tileSize;
+		const int totalTiles = tilesX * tilesY;
+
+		// Atomic counter for tile indexing
+		std::atomic<int> currentTile(0);
+
+		// Lambda for each worker thread
+		auto worker = [&](int threadId)
 			{
-				float px = x + 0.5f;
-				float py = y + 0.5f;
-				Ray ray = scene->camera.generateRay(px, py);
-				//Colour col = viewNormals(ray);
-				//Colour col = albedo(ray);
-				Colour pathThroughput = Colour(1.0f, 1.0f, 1.0f);
-				Colour col = pathTrace(ray, pathThroughput, 0, &samplers[0]);
-				film->splat(px, py, col);
-				unsigned char r = (unsigned char)(col.r * 255);
-				unsigned char g = (unsigned char)(col.g * 255);
-				unsigned char b = (unsigned char)(col.b * 255);
-				film->tonemap(x, y, r, g, b);
-				canvas->draw(x, y, r, g, b);
-			}
-		}
+				// Each thread grabs next tile index until none remain
+				while (true)
+				{
+					int tileIndex = currentTile.fetch_add(1);
+					if (tileIndex >= totalTiles) break;
+
+					// Compute tile coordinates
+					int tx = tileIndex % tilesX;
+					int ty = tileIndex / tilesX;
+					int xStart = tx * tileSize;
+					int xEnd = std::min((int)film->width, xStart + tileSize);
+					int yStart = ty * tileSize;
+					int yEnd = std::min((int)film->height, yStart + tileSize);
+
+					// Render each pixel within this tile
+					for (int y = yStart; y < yEnd; y++)
+					{
+						for (int x = xStart; x < xEnd; x++)
+						{
+							float px = x + 0.5f;
+							float py = y + 0.5f;
+							Ray ray = scene->camera.generateRay(px, py);
+							Colour pathThroughput = Colour(1.0f, 1.0f, 1.0f);
+							Colour col = pathTrace(ray, pathThroughput, 0, &samplers[threadId]);
+
+							film->splat(px, py, col);
+							unsigned char r = (unsigned char)(col.r * 255);
+							unsigned char g = (unsigned char)(col.g * 255);
+							unsigned char b = (unsigned char)(col.b * 255);
+							film->tonemap(x, y, r, g, b);
+							canvas->draw(x, y, r, g, b);
+						}
+					}
+				}
+			};
+
+		// Launch multiple threads
+		std::vector<std::thread> threadGroup;
+		for (int i = 0; i < numProcs; i++)
+			threadGroup.emplace_back(worker, i);
+
+		// Wait for all threads to finish
+		for (auto& t : threadGroup)
+			t.join();
 	}
+
 	int getSPP()
 	{
 		return film->SPP;
