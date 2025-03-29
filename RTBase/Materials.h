@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "Core.h"
 #include "Imaging.h"
@@ -36,12 +36,70 @@ public:
 	static float fresnelDielectric(float cosTheta, float iorInt, float iorExt)
 	{
 		// Add code here
-		return 1.0f;
+	    // Ensure cosTheta is in the right range
+		bool entering = cosTheta > 0.0f;
+
+		// If we're leaving the material, swap the IORs and use the absolute value of cosTheta
+		if (!entering) {
+			std::swap(iorInt, iorExt);
+			cosTheta = std::abs(cosTheta);
+		}
+
+		// Compute the relative index of refraction
+		float eta = iorExt / iorInt;
+
+		// Compute sin^2(theta_t) using Snell's law
+		float sinThetaTSq = eta * eta * (1.0f - cosTheta * cosTheta);
+
+		// Check for total internal reflection
+		if (sinThetaTSq >= 1.0f)
+			return 1.0f;
+
+		// Calculate cos(theta_t) using the sin^2 value
+		float cosThetaT = std::sqrt(1.0f - sinThetaTSq);
+
+		// Calculate Fresnel reflectance using Fresnel equations for dielectrics
+		// Rs (perpendicular polarization)
+		float Rs = ((iorInt * cosTheta) - (iorExt * cosThetaT)) /
+			((iorInt * cosTheta) + (iorExt * cosThetaT));
+		Rs = Rs * Rs;
+
+		// Rp (parallel polarization)
+		float Rp = ((iorExt * cosTheta) - (iorInt * cosThetaT)) /
+			((iorExt * cosTheta) + (iorInt * cosThetaT));
+		Rp = Rp * Rp;
+
+		// Average the two polarization states for unpolarized light
+		return (Rs + Rp) * 0.5f;
 	}
 	static Colour fresnelConductor(float cosTheta, Colour ior, Colour k)
 	{
 		// Add code here
-		return Colour(1.0f, 1.0f, 1.0f);
+	   // Ensure cosTheta is positive (conductors are not transmissive)
+		cosTheta = std::abs(cosTheta);
+
+		// Calculate eta^2 + k^2 for each wavelength
+		Colour eta2_plus_k2 = (ior * ior) + (k * k);
+
+		// Calculate 2 * eta * cosTheta for each wavelength
+		Colour two_eta_cosTheta = ior * (2.0f * cosTheta);
+
+		// Calculate r_parallel components
+		Colour t0 = eta2_plus_k2 * (cosTheta * cosTheta);
+		// Correct the operations: addition vs subtraction
+		Colour a_plus_b = (t0 + Colour(1.0f, 1.0f, 1.0f)) + two_eta_cosTheta;
+		Colour a_minus_b = (t0 + Colour(1.0f, 1.0f, 1.0f)) - two_eta_cosTheta;
+		Colour r_parallel = a_minus_b / a_plus_b;
+
+		// Calculate r_perpendicular components
+		Colour t1 = eta2_plus_k2 + Colour(cosTheta * cosTheta, cosTheta * cosTheta, cosTheta * cosTheta);
+		// Correct the operations: addition vs subtraction
+		Colour b_plus_1 = t1 + two_eta_cosTheta;
+		Colour b_minus_1 = t1 - two_eta_cosTheta;
+		Colour r_perpendicular =  b_minus_1 / b_plus_1 ;
+
+		// Average the two polarization directions for unpolarized light
+		return (r_parallel + r_perpendicular) * 0.5f;
 	}
 	static float lambdaGGX(Vec3 wi, float alpha)
 	{
@@ -97,11 +155,25 @@ public:
 	Vec3 sample(const ShadingData& shadingData, Sampler* sampler, Colour& reflectedColour, float& pdf)
 	{
 		// Add correct sampling code here
-		Vec3 wi = Vec3(0, 1, 0);
-		pdf = 1.0f;
+		//Vec3 wi = Vec3(0, 1, 0);
+		//pdf = 1.0f;
+		//reflectedColour = albedo->sample(shadingData.tu, shadingData.tv) / M_PI;
+		//wi = shadingData.frame.toWorld(wi);
+		//return wi;
+
+		// Generate cosine-weighted direction in local space
+		Vec3 wiLocal = SamplingDistributions::cosineSampleHemisphere(sampler->next(), sampler->next());
+
+		// Calculate PDF for this sample (cosine-weighted distribution)
+		pdf = wiLocal.z / M_PI;  // cos(theta) / pi
+
+		// Get albedo at the shading point and apply diffuse BRDF (1/π)
 		reflectedColour = albedo->sample(shadingData.tu, shadingData.tv) / M_PI;
-		wi = shadingData.frame.toWorld(wi);
+
+		// Transform the local direction to world space
+		Vec3 wi = shadingData.frame.toWorld(wiLocal);
 		return wi;
+
 	}
 	Colour evaluate(const ShadingData& shadingData, const Vec3& wi)
 	{
@@ -110,7 +182,11 @@ public:
 	float PDF(const ShadingData& shadingData, const Vec3& wi)
 	{
 		// Add correct PDF code here
-		return 1.0f;
+		Vec3 wiLocal = shadingData.frame.toLocal(wi);
+		if (wiLocal.z <= 0)
+			return 0.0f;
+
+		return wiLocal.z / M_PI;
 	}
 	bool isPureSpecular()
 	{
@@ -234,23 +310,85 @@ public:
 	}
 	Vec3 sample(const ShadingData& shadingData, Sampler* sampler, Colour& reflectedColour, float& pdf)
 	{
-		// Replace this with Glass sampling code
-		Vec3 wi = SamplingDistributions::cosineSampleHemisphere(sampler->next(), sampler->next());
-		pdf = wi.z / M_PI;
-		reflectedColour = albedo->sample(shadingData.tu, shadingData.tv) / M_PI;
-		wi = shadingData.frame.toWorld(wi);
+		// Get the outgoing direction in local coordinates
+		Vec3 woLocal = shadingData.frame.toLocal(shadingData.wo);
+
+		// Calculate cosine of incident angle
+		float cosTheta = woLocal.z;
+
+		// Calculate Fresnel reflectance
+		float Fr = ShadingHelper::fresnelDielectric(cosTheta, intIOR, extIOR);
+
+		// Choose between reflection and refraction based on Fresnel
+		bool doReflect = (sampler->next() < Fr);
+
+		Vec3 wiLocal;
+		if (doReflect) {
+			// Perfect specular reflection: reflect around normal
+			wiLocal = Vec3(-woLocal.x, -woLocal.y, woLocal.z);
+			// PDF is the Fresnel reflectance since we're randomly choosing based on it
+			pdf = Fr;
+		}
+		else {
+			// Determine if we're entering or exiting the medium
+			bool entering = cosTheta > 0;
+
+			// Adjust IORs and normal direction if needed
+			float etaI = entering ? extIOR : intIOR;
+			float etaT = entering ? intIOR : extIOR;
+			float eta = etaI / etaT;
+
+			// Calculate refraction direction using Snell's law
+			float sinThetaISq = std::max(0.0f, 1.0f - cosTheta * cosTheta);
+			float sinThetaTSq = eta * eta * sinThetaISq;
+
+			// Check for total internal reflection (should not happen due to Fresnel check)
+			if (sinThetaTSq >= 1.0f) {
+				// Fall back to reflection
+				wiLocal = Vec3(-woLocal.x, -woLocal.y, woLocal.z);
+				pdf = 1.0f;
+			}
+			else {
+				float cosThetaT = std::sqrt(1.0f - sinThetaTSq);
+				// Flip the z component for transmission
+				wiLocal = Vec3(-eta * woLocal.x, -eta * woLocal.y,
+					entering ? -cosThetaT : cosThetaT);
+				pdf = 1.0f - Fr;
+			}
+		}
+
+		// Transform direction to world space
+		Vec3 wi = shadingData.frame.toWorld(wiLocal);
+
+		// Apply the albedo with proper scaling
+		// For refraction, we need to account for energy conservation
+		Colour baseColor = albedo->sample(shadingData.tu, shadingData.tv);
+
+		if (doReflect) {
+			reflectedColour = baseColor;
+		}
+		else {
+			// When refracting, radiance is scaled by (n2/n1)^2
+			// This is due to the change in solid angle and energy conservation
+			bool entering = cosTheta > 0;
+			float etaI = entering ? extIOR : intIOR;
+			float etaT = entering ? intIOR : extIOR;
+			float scale = (etaT * etaT) / (etaI * etaI);
+
+			reflectedColour = baseColor * scale;
+		}
+
 		return wi;
 	}
 	Colour evaluate(const ShadingData& shadingData, const Vec3& wi)
 	{
 		// Replace this with Glass evaluation code
-		return albedo->sample(shadingData.tu, shadingData.tv) / M_PI;
+		return Colour(0.0f, 0.0f, 0.0f);;
 	}
 	float PDF(const ShadingData& shadingData, const Vec3& wi)
 	{
 		// Replace this with GlassPDF
-		Vec3 wiLocal = shadingData.frame.toLocal(wi);
-		return SamplingDistributions::cosineHemispherePDF(wiLocal);
+		return 0.0f;
 	}
 	bool isPureSpecular()
 	{
